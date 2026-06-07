@@ -1,0 +1,11 @@
+{
+  "channel": "stable",
+  "version": "0.1.0",
+  "releasedAt": "2026-06-07T19:25:31.859Z",
+  "images": {
+    "api": "ghcr.io/voidnery/vpncp-api:0.1.0",
+    "web": "ghcr.io/voidnery/vpncp-web:0.1.0"
+  },
+  "minUpgradeFrom": "0.0.0",
+  "changelog": "- initial import"
+}

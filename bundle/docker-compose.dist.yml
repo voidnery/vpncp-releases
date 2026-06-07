@@ -1,0 +1,104 @@
+# =============================================================================
+# VPN Control Plane — DISTRIBUTION compose (pull pre-built images).
+#
+# For end-user installs of the closed-source product. Unlike docker-compose.yml
+# (which BUILDS from source — maintainer only), this pulls version-pinned images
+# published by CI to a registry. Mongo + Redis are bundled.
+#
+#   Pin a version:   VPNCP_VERSION=v0.1.0  in .env  (default: stable)
+#   Registry:        VPNCP_REGISTRY=ghcr.io/<you>  in .env
+#   Update:          docker compose -f docker-compose.dist.yml pull && \
+#                    docker compose -f docker-compose.dist.yml up -d
+#
+# NOTE: the referenced images (vpncp-api / vpncp-web) are published in Phase 2
+# (CI). Until then this file is the distribution template.
+# =============================================================================
+
+networks:
+  vpncp:
+    driver: bridge
+
+volumes:
+  mongo_data:
+  redis_data:
+  certbot_certs:
+  certbot_www:
+  ca_data:
+
+services:
+  mongo:
+    image: mongo:7.0
+    restart: unless-stopped
+    networks: [vpncp]
+    volumes:
+      - mongo_data:/data/db
+      - ./ops/mongo/init.js:/docker-entrypoint-initdb.d/init.js:ro
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASS}
+      MONGO_INITDB_DATABASE: ${MONGO_DB}
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7.2-alpine
+    restart: unless-stopped
+    networks: [vpncp]
+    command: ["redis-server", "--requirepass", "${REDIS_PASS}", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASS}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    image: ${VPNCP_REGISTRY:-ghcr.io/voidnery}/vpncp-api:${VPNCP_VERSION:-stable}
+    restart: unless-stopped
+    networks: [vpncp]
+    env_file: .env
+    volumes:
+      - ca_data:/app/ca
+    depends_on:
+      mongo: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://localhost:4000/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  web:
+    image: ${VPNCP_REGISTRY:-ghcr.io/voidnery}/vpncp-web:${VPNCP_VERSION:-stable}
+    restart: unless-stopped
+    networks: [vpncp]
+    depends_on: [api]
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    networks: [vpncp]
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8443:8443"
+    volumes:
+      - ./ops/nginx/conf.d:/etc/nginx/conf.d:ro
+      - certbot_certs:/etc/letsencrypt:ro
+      - certbot_www:/var/www/certbot:ro
+    depends_on:
+      api: { condition: service_healthy }
+      web: { condition: service_started }
+
+  certbot:
+    image: certbot/certbot:latest
+    restart: "no"
+    volumes:
+      - certbot_certs:/etc/letsencrypt
+      - certbot_www:/var/www/certbot
+    entrypoint: ["sh", "-c", "trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done"]
