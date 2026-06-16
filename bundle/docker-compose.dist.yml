@@ -24,6 +24,7 @@ volumes:
   certbot_certs:
   certbot_www:
   ca_data:
+  vpncp_update:
 
 services:
   mongo:
@@ -61,8 +62,12 @@ services:
     restart: unless-stopped
     networks: [vpncp]
     env_file: .env
+    environment:
+      # Enables in-panel self-update: api writes a trigger the updater watches.
+      VPNCP_UPDATE_COMMAND: "date +%s > /run/vpncp-update/trigger"
     volumes:
       - ca_data:/app/ca
+      - vpncp_update:/run/vpncp-update
     depends_on:
       mongo: { condition: service_healthy }
       redis: { condition: service_healthy }
@@ -102,3 +107,20 @@ services:
       - certbot_certs:/etc/letsencrypt
       - certbot_www:/var/www/certbot
     entrypoint: ["sh", "-c", "trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done"]
+
+  # Privileged helper for in-panel self-update. Holds the Docker socket so the
+  # api container does not have to. Watches a trigger file and recreates the
+  # stack with the freshly pulled images. Omit this service to keep updates
+  # fully manual (the panel then shows the host command instead of the animation).
+  updater:
+    image: docker:27-cli
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/updater/watch.sh"]
+    environment:
+      VPNCP_COMPOSE_FILE: docker-compose.dist.yml
+      VPNCP_PROJECT_DIR: /compose
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./:/compose:ro
+      - ./ops/updater/watch.sh:/updater/watch.sh:ro
+      - vpncp_update:/run/vpncp-update
