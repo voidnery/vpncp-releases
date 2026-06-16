@@ -72,7 +72,7 @@ case "$(getval REDIS_PASS)" in CHANGE_ME*|"") setval REDIS_PASS "$(gen_pwd)";; e
 
 # Rebuild connection URIs from the (possibly new) credentials.
 MU=$(getval MONGO_USER); MP=$(getval MONGO_PASS); MD=$(getval MONGO_DB); RP=$(getval REDIS_PASS)
-setval MONGO_URI "mongodb://${MU}:$(urlenc "$MP")@mongo:27017/${MD}?authSource=${MD}"
+setval MONGO_URI "mongodb://${MU}:$(urlenc "$MP")@mongo:27017/${MD}?authSource=admin"
 setval REDIS_URL "redis://default:$(urlenc "$RP")@redis:6379"
 
 # --- prompts for values we cannot invent ---
