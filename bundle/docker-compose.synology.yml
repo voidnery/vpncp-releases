@@ -91,8 +91,12 @@ services:
     entrypoint:
       - /bin/sh
       - -c
+      # NB: $$ escapes the $ so docker compose passes it through to the shell,
+      # which reads PANEL_DOMAIN from the container env (set above). A bare
+      # A bare reference would be interpolated (to empty) by compose at parse time.
       - |
         set -e
+        DOMAIN="$${PANEL_DOMAIN:-netcontrol.local}"
         if [ -f /certs/fullchain.pem ] && [ -f /certs/privkey.pem ]; then
           echo "certinit: cert already present, leaving it untouched"
           exit 0
@@ -100,10 +104,10 @@ services:
         apk add --no-cache openssl >/dev/null
         openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
           -keyout /certs/privkey.pem -out /certs/fullchain.pem \
-          -subj "/CN=${PANEL_DOMAIN}" \
-          -addext "subjectAltName=DNS:${PANEL_DOMAIN}"
+          -subj "/CN=$$DOMAIN" \
+          -addext "subjectAltName=DNS:$$DOMAIN"
         chmod 600 /certs/privkey.pem
-        echo "certinit: generated self-signed cert for ${PANEL_DOMAIN}"
+        echo "certinit: generated self-signed cert for $$DOMAIN"
     volumes:
       - nginx_certs:/certs
 
