@@ -4,8 +4,9 @@
 # Pulls version-pinned, pre-built images published by CI (release.yml) to GHCR.
 # Designed for Synology DSM, which differs from a plain VPS:
 #   - DSM already owns ports 80/443, so the panel uses ONE high TLS port (8443).
-#   - No certbot (DSM has no webroot to share); the agent/UI cert is self-signed
-#     on first boot by `certinit`, or replace it with a real cert for production.
+#   - No certbot. You provide the TLS cert: drop fullchain.pem + privkey.pem into
+#     ./ops/synology/certs (bind-mounted into nginx). Populate it from DSM's
+#     Let's Encrypt with ops/synology/sync-cert.sh, or by hand.
 #   - No privileged auto-updater; you update from Container Manager (or SSH) with
 #     a pull + recreate. The panel's "Обновления" page shows the exact command.
 #
@@ -24,7 +25,6 @@ volumes:
   mongo_data:
   redis_data:
   ca_data:
-  nginx_certs:
 
 services:
   mongo:
@@ -81,36 +81,6 @@ services:
     networks: [vpncp]
     depends_on: [api]
 
-  # One-shot: generate a self-signed cert for the panel port if none exists yet.
-  # Replace /etc/nginx/certs (the nginx_certs volume) with a real cert for prod.
-  certinit:
-    image: alpine:3.20
-    networks: [vpncp]
-    environment:
-      PANEL_DOMAIN: ${PUBLIC_DOMAIN:-netcontrol.local}
-    entrypoint:
-      - /bin/sh
-      - -c
-      # NB: $$ escapes the $ so docker compose passes it through to the shell,
-      # which reads PANEL_DOMAIN from the container env (set above). A bare
-      # A bare reference would be interpolated (to empty) by compose at parse time.
-      - |
-        set -e
-        DOMAIN="$${PANEL_DOMAIN:-netcontrol.local}"
-        if [ -f /certs/fullchain.pem ] && [ -f /certs/privkey.pem ]; then
-          echo "certinit: cert already present, leaving it untouched"
-          exit 0
-        fi
-        apk add --no-cache openssl >/dev/null
-        openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
-          -keyout /certs/privkey.pem -out /certs/fullchain.pem \
-          -subj "/CN=$$DOMAIN" \
-          -addext "subjectAltName=DNS:$$DOMAIN"
-        chmod 600 /certs/privkey.pem
-        echo "certinit: generated self-signed cert for $$DOMAIN"
-    volumes:
-      - nginx_certs:/certs
-
   nginx:
     image: nginx:1.27-alpine
     restart: unless-stopped
@@ -121,8 +91,9 @@ services:
       - "${PANEL_PORT:-8443}:8443"
     volumes:
       - ./ops/nginx/conf.d/synology.conf:/etc/nginx/conf.d/default.conf:ro
-      - nginx_certs:/etc/nginx/certs:ro
+      # Operator-provided cert (bring-your-own). Drop fullchain.pem +
+      # privkey.pem into ./ops/synology/certs BEFORE first start, or nginx won't boot.
+      - ./ops/synology/certs:/etc/nginx/certs:ro
     depends_on:
       api: { condition: service_healthy }
       web: { condition: service_started }
-      certinit: { condition: service_completed_successfully }
