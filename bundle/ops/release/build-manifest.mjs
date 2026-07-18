@@ -9,9 +9,16 @@
  *     --min-upgrade-from 0.0.0 > stable.json
  *
  * Output shape:
- *   { channel, version, releasedAt, images:{api,web}, minUpgradeFrom, changelog }
+ *   { channel, version, releasedAt, images:{api,web}, minUpgradeFrom, changelog,
+ *     deploy:{ files:[{path,sha256}] } }
+ *
+ * `deploy` lets an installed panel keep its ON-HOST deploy files (compose file,
+ * updater script) in sync with the release automatically. Hashes are computed
+ * from the repo copies that are published to bundle/ in the same run, so the
+ * updater can verify what it downloads.
  */
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 
 function arg(name, def = "") {
   const i = process.argv.indexOf(`--${name}`);
@@ -23,6 +30,12 @@ const channel = arg("channel", "stable");
 const registry = arg("registry", "ghcr.io/voidnery").replace(/\/+$/, "");
 const minUpgradeFrom = arg("min-upgrade-from", "0.0.0");
 const changelogPath = arg("changelog");
+// Repo root the deploy files are read from (defaults to cwd = repo checkout).
+const deployRoot = arg("deploy-root", ".").replace(/\/+$/, "");
+
+// Kept in step with SYNCABLE_DEPLOY_FILES in packages/shared/src/updates.ts.
+// The updater enforces its own copy of this list regardless of what we emit.
+const DEPLOY_FILES = ["docker-compose.dist.yml", "ops/updater/watch.sh"];
 
 if (!version) {
   console.error("error: --version is required");
@@ -38,6 +51,16 @@ if (changelogPath) {
   }
 }
 
+const deployFiles = [];
+for (const rel of DEPLOY_FILES) {
+  try {
+    const buf = readFileSync(`${deployRoot}/${rel}`);
+    deployFiles.push({ path: rel, sha256: createHash("sha256").update(buf).digest("hex") });
+  } catch {
+    console.error(`warn: deploy file missing, skipping: ${rel}`);
+  }
+}
+
 const manifest = {
   channel,
   version,
@@ -48,6 +71,7 @@ const manifest = {
   },
   minUpgradeFrom,
   changelog,
+  ...(deployFiles.length > 0 ? { deploy: { files: deployFiles } } : {}),
 };
 
 process.stdout.write(JSON.stringify(manifest, null, 2) + "\n");

@@ -31,6 +31,15 @@ LOG="$TRIGGER_DIR/last-update.log"
 DIR="${VPNCP_PROJECT_DIR:-/compose}"
 FILE="${VPNCP_COMPOSE_FILE:-docker-compose.dist.yml}"
 SELF_SERVICE="${VPNCP_UPDATER_SERVICE:-updater}"
+REQUEST="$TRIGGER_DIR/request.json"
+RELEASES_BASE="${VPNCP_RELEASES_BASE_URL:-https://raw.githubusercontent.com/voidnery/vpncp-releases/main}"
+
+# The ONLY on-host files an update may overwrite. Enforced HERE, not taken from
+# the manifest or from the api: this sidecar is root-capable, so it must not let
+# a tampered manifest or a compromised api choose which paths to write.
+# Mirrors SYNCABLE_DEPLOY_FILES in packages/shared/src/updates.ts.
+# `.env` is deliberately absent — it holds secrets and belongs to the operator.
+ALLOWED_FILES="docker-compose.dist.yml ops/updater/watch.sh"
 
 mkdir -p "$TRIGGER_DIR" 2>/dev/null || true
 chmod 0777 "$TRIGGER_DIR" 2>/dev/null || true
@@ -69,9 +78,84 @@ if [ -n "$PROJECT" ]; then PROJ="-p $PROJECT"; else PROJ=""; fi
 
 echo "[updater] watching $TRIGGER (dir=$DIR file=$FILE project=${PROJECT:-<default>})"
 
+# --- deploy-file sync -------------------------------------------------------
+# Keeps the compose file and this script in step with the release, so upgrading
+# an install never again requires hand-copying files over SSH.
+#
+# Trust model: the version comes from the api (sanitised there, re-sanitised
+# here), but the manifest, the hashes and the download URLs are resolved by THIS
+# script from its own configured base URL. Every file is verified against the
+# sha256 in the manifest before it is allowed anywhere near the project dir.
+is_allowed() {
+  case " $ALLOWED_FILES " in *" $1 "*) return 0 ;; *) return 1 ;; esac
+}
+
+sync_deploy_files() {
+  _version="$1"
+  [ -n "$_version" ] || return 0
+
+  _mf="$TRIGGER_DIR/manifest.json"
+  if ! wget -q -T 20 -O "$_mf" "$RELEASES_BASE/versions/$_version.json" 2>>"$LOG"; then
+    echo "[updater] no version manifest for $_version — skipping deploy sync"
+    return 0
+  fi
+
+  # Extract path/sha pairs without a JSON parser (busybox shell only).
+  _pairs="$(tr -d ' \n' < "$_mf" \
+    | grep -o '"path":"[^"]*","sha256":"[0-9a-f]*"' \
+    | sed -e 's/"path":"//' -e 's/","sha256":"/ /' -e 's/"$//')"
+  [ -n "$_pairs" ] || { echo "[updater] manifest has no deploy files — skipping sync"; return 0; }
+
+  _changed=""
+  echo "$_pairs" | while read -r _path _sha; do
+    [ -n "$_path" ] || continue
+    if ! is_allowed "$_path"; then
+      echo "[updater] REFUSED non-allowlisted deploy path: $_path"
+      continue
+    fi
+    # Already identical? Nothing to do.
+    if [ -f "$DIR/$_path" ] && [ "$(sha256sum "$DIR/$_path" | cut -d" " -f1)" = "$_sha" ]; then
+      continue
+    fi
+    _tmp="$TRIGGER_DIR/dl.tmp"
+    if ! wget -q -T 30 -O "$_tmp" "$RELEASES_BASE/bundle/$_path" 2>>"$LOG"; then
+      echo "[updater] WARN: could not download $_path — keeping current file"
+      continue
+    fi
+    _got="$(sha256sum "$_tmp" | cut -d" " -f1)"
+    if [ "$_got" != "$_sha" ]; then
+      echo "[updater] REFUSED $_path: sha256 mismatch (want $_sha got $_got)"
+      rm -f "$_tmp"
+      continue
+    fi
+    mkdir -p "$DIR/$(dirname "$_path")" 2>/dev/null || true
+    # Keep one backup so a bad deploy file can be restored by hand.
+    [ -f "$DIR/$_path" ] && cp -f "$DIR/$_path" "$DIR/$_path.bak" 2>/dev/null || true
+    if cp -f "$_tmp" "$DIR/$_path" 2>>"$LOG"; then
+      echo "[updater] synced $_path"
+      echo "$_path" >> "$TRIGGER_DIR/.changed"
+    else
+      echo "[updater] WARN: project dir not writable — cannot sync $_path"
+    fi
+    rm -f "$_tmp"
+  done
+  return 0
+}
+
 # --- the update itself ------------------------------------------------------
 run_update() {
   : > "$LOG"
+  rm -f "$TRIGGER_DIR/.changed"
+
+  # Sync deploy files FIRST, so the pull/recreate below already uses the compose
+  # file that ships with the target release.
+  _req_version=""
+  if [ -f "$REQUEST" ]; then
+    _req_version="$(tr -d ' \n' < "$REQUEST" | grep -o '"version":"[^"]*"' | sed -e 's/"version":"//' -e 's/"$//')"
+    _req_version="$(printf '%s' "$_req_version" | tr -cd 'A-Za-z0-9._-' | cut -c1-64)"
+  fi
+  write_state syncing 0 0 "$_req_version"
+  sync_deploy_files "$_req_version"
 
   # Every service except ourselves. Recreating the updater would kill this shell
   # mid-update (trap #1 above), so it is deliberately excluded and keeps running
@@ -115,6 +199,16 @@ run_update() {
 
   write_state applied "$TOTAL" "$TOTAL" ""
   echo "[updater] update applied"
+
+  # If this very script was updated, the running process is still the OLD code
+  # (the file is mounted, not reloaded). Restarting ourselves is safe only now:
+  # the update is finished and the state file already says so. This command kills
+  # our own container, so nothing may follow it.
+  if [ -f "$TRIGGER_DIR/.changed" ] && grep -q "ops/updater/watch.sh" "$TRIGGER_DIR/.changed" 2>/dev/null; then
+    echo "[updater] watch.sh changed — restarting self to pick it up"
+    rm -f "$TRIGGER_DIR/.changed"
+    docker restart "$(hostname)" >/dev/null 2>&1 &
+  fi
   return 0
 }
 

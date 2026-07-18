@@ -122,8 +122,16 @@ services:
     environment:
       VPNCP_COMPOSE_FILE: docker-compose.dist.yml
       VPNCP_PROJECT_DIR: /compose
+      # Where release manifests + the deploy bundle are fetched from. Override
+      # only for a fork or an internal mirror.
+      VPNCP_RELEASES_BASE_URL: ${VPNCP_RELEASES_BASE_URL:-https://raw.githubusercontent.com/voidnery/vpncp-releases/main}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./:/compose:ro
+      # WRITABLE on purpose: the updater keeps the deploy files (this compose
+      # file, its own script) in sync with the release, so upgrading never needs
+      # files copied in by hand. It only ever writes the paths in its allowlist,
+      # each verified against the sha256 in the signed release manifest. This
+      # grants no new privilege — the Docker socket above is already root.
+      - ./:/compose
       - ./ops/updater/watch.sh:/updater/watch.sh:ro
       - vpncp_update:/run/vpncp-update
