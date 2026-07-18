@@ -65,6 +65,9 @@ services:
     environment:
       # Enables in-panel self-update: api writes a trigger the updater watches.
       VPNCP_UPDATE_COMMAND: "date +%s > /run/vpncp-update/trigger"
+      # Used only to render the manual command on the Updates page.
+      VPNCP_COMPOSE_DIR: ${VPNCP_COMPOSE_DIR:-/opt/vpncp}
+      VPNCP_COMPOSE_FILE: docker-compose.dist.yml
     volumes:
       - ca_data:/app/ca
       - vpncp_update:/run/vpncp-update

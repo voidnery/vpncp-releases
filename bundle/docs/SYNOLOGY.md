@@ -153,8 +153,18 @@ docker compose -f docker-compose.synology.yml up -d
 ```
 
 Your data (Mongo, Redis, CA, cert) lives in named volumes and survives updates.
-The panel's **Обновления** page shows the current version and the exact pull
-command for your install.
+
+### Release channel (stable / beta)
+
+The panel's **Обновления** page shows the current version, the latest release on
+your channel, and the exact pull command for **this** install. You never enter a
+manifest URL — pick **stable** (recommended) or **beta** in *Update settings* and
+the panel reads that channel itself.
+
+So the shown command matches your NAS, keep `VPNCP_COMPOSE_DIR` in `.env` equal
+to the folder holding `docker-compose.synology.yml` (default
+`/volume1/docker/netcontrol`). If you pin `VPNCP_VERSION`, bump it to the version
+the page reports before pulling; on `stable`/`beta` the pull alone is enough.
 
 ## Backups
 

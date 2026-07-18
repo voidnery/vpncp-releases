@@ -63,6 +63,12 @@ services:
     restart: unless-stopped
     networks: [vpncp]
     env_file: .env
+    environment:
+      # No privileged updater on DSM: the panel shows the exact manual command
+      # instead. These make that command match THIS install (project folder +
+      # compose file) rather than the VPS defaults.
+      VPNCP_COMPOSE_DIR: ${VPNCP_COMPOSE_DIR:-/volume1/docker/netcontrol}
+      VPNCP_COMPOSE_FILE: docker-compose.synology.yml
     volumes:
       - ca_data:/app/ca
     depends_on:
