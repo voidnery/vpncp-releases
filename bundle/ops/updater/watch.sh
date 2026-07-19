@@ -244,6 +244,11 @@ run_update() {
     return 1
   fi
 
+  # Every release leaves the previous layers behind; on a small VPS that grows
+  # without bound. Dangling (untagged) images only — never `prune -a`, which
+  # would delete the previous release image and destroy the rollback path.
+  docker image prune -f >>"$LOG" 2>&1 || true
+
   write_state applied "$TOTAL" "$TOTAL" ""
   echo "[updater] update applied"
 
@@ -259,8 +264,50 @@ run_update() {
   return 0
 }
 
+# --- watchdog ---------------------------------------------------------------
+# Why this exists: on 2026-07-19 the nginx container died after a successful
+# update and did NOT come back, despite `restart: unless-stopped`. The panel was
+# simply unreachable until a human noticed and ran `up -d`. Nothing watched it.
+#
+# This restarts any project container that is not running. Two deliberate rules:
+#   * only NOT-RUNNING containers are touched — never "unhealthy" ones. Restarting
+#     on health alone risks a restart loop that turns a degraded panel into a
+#     dead one.
+#   * containers whose restart policy is "no" are skipped, because they are meant
+#     to exit (certbot runs and finishes; restarting it forever would be wrong).
+#
+# Before restarting, the dead container's exit code / OOM flag are recorded. That
+# is what was missing during the incident: recreating the container destroyed the
+# only evidence of why it died.
+INCIDENTS="$TRIGGER_DIR/incidents.log"
+
+watchdog_tick() {
+  [ -n "$PROJECT" ] || return 0
+  docker ps -a --filter "label=com.docker.compose.project=$PROJECT" \
+    --format '{{.ID}} {{.Label "com.docker.compose.service"}} {{.State}}' 2>/dev/null \
+  | while read -r _cid _svc _state; do
+      [ -n "$_svc" ] || continue
+      [ "$_svc" = "$SELF_SERVICE" ] && continue
+      [ "$_state" = "running" ] && continue
+      [ "$_state" = "restarting" ] && continue
+      _pol="$(docker inspect "$_cid" --format '{{.HostConfig.RestartPolicy.Name}}' 2>/dev/null)"
+      case "$_pol" in "" | no) continue ;; esac
+
+      _post="$(docker inspect "$_cid" \
+        --format 'exit={{.State.ExitCode}} oom={{.State.OOMKilled}} err="{{.State.Error}}" finished={{.State.FinishedAt}}' 2>/dev/null)"
+      _now="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+      echo "[watchdog] $_now $_svc was '$_state' ($_post) — restarting" | tee -a "$INCIDENTS"
+      if docker compose $PROJ -f "$FILE" up -d --no-deps "$_svc" >>"$INCIDENTS" 2>&1; then
+        echo "[watchdog] $_svc restarted" | tee -a "$INCIDENTS"
+      else
+        echo "[watchdog] FAILED to restart $_svc" | tee -a "$INCIDENTS"
+      fi
+    done
+}
+
 LAST=""
 [ -f "$TRIGGER" ] && LAST="$(cat "$TRIGGER" 2>/dev/null || echo seed)"
+TICK=0
 
 while true; do
   if [ -f "$TRIGGER" ]; then
@@ -270,6 +317,12 @@ while true; do
       echo "[updater] trigger=$NOW — pull + recreate"
       run_update || true
     fi
+  fi
+  # Watchdog every ~60s (20 ticks x 3s). Skipped implicitly while an update runs,
+  # because run_update blocks this same loop.
+  TICK=$((TICK + 1))
+  if [ "$((TICK % 20))" = "0" ]; then
+    watchdog_tick
   fi
   sleep 3
 done

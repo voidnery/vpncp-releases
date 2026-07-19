@@ -102,6 +102,18 @@ services:
     depends_on:
       api: { condition: service_healthy }
       web: { condition: service_started }
+    # Liveness of nginx ITSELF, deliberately independent of the config and of the
+    # upstreams: any HTTP status line (200, 404, even 502) proves nginx is serving.
+    # Checking a specific route would report "unhealthy" whenever api or web is
+    # down, which is a different fault entirely.
+    # Informational only — the updater's watchdog restarts containers that are not
+    # RUNNING, never merely unhealthy ones, so this can never cause a restart loop.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -S -O /dev/null http://127.0.0.1/ 2>&1 | grep -q 'HTTP/'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   certbot:
     image: certbot/certbot:latest
