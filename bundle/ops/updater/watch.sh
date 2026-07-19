@@ -142,6 +142,51 @@ sync_deploy_files() {
   return 0
 }
 
+# --- version pinning --------------------------------------------------------
+# The manifest names an EXACT image (…/vpncp-api:0.4.7), but the compose file
+# defaults to the floating :stable tag. Pulling :stable is not the same thing as
+# pulling what the panel showed the operator: if the tag lags, the update
+# "succeeds" while nothing actually changes, and the panel keeps offering the
+# same release forever. Pinning makes an update deterministic, and makes rollback
+# a one-line edit of .env.
+#
+# .env holds secrets and belongs to the operator, so exactly ONE key is touched
+# and the file is rewritten in place (not replaced) to preserve its ownership and
+# permissions. The version was already sanitised by the api and again below.
+pin_version() {
+  _v="$(printf '%s' "${1:-}" | tr -cd 'A-Za-z0-9._-' | cut -c1-64)"
+  [ -n "$_v" ] || return 0
+  # Only ever pin something that looks like a real release (1.2.3 / 1.2.3-beta.1).
+  # Stripping dangerous characters is not enough on its own: the leftovers would
+  # be written as a version that simply cannot be pulled, breaking every future
+  # update until someone edits .env by hand.
+  if ! printf '%s' "$_v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.]+)?$'; then
+    echo "[updater] REFUSED to pin implausible version: $_v"
+    return 0
+  fi
+  _env="$DIR/.env"
+  if [ ! -f "$_env" ]; then
+    echo "[updater] no .env in $DIR — cannot pin version, using the floating tag"
+    return 0
+  fi
+  _cur="$(grep '^VPNCP_VERSION=' "$_env" 2>/dev/null | head -1 | cut -d= -f2-)"
+  [ "$_cur" = "$_v" ] && return 0
+
+  _tmp="$TRIGGER_DIR/env.tmp"
+  if [ -n "$_cur" ]; then
+    sed "s|^VPNCP_VERSION=.*|VPNCP_VERSION=$_v|" "$_env" > "$_tmp" 2>>"$LOG" || return 0
+  else
+    { cat "$_env"; echo "VPNCP_VERSION=$_v"; } > "$_tmp" 2>>"$LOG" || return 0
+  fi
+  # Truncate-and-write keeps the original inode, owner and mode.
+  if cat "$_tmp" > "$_env" 2>>"$LOG"; then
+    echo "[updater] pinned VPNCP_VERSION=$_v (was ${_cur:-unset})"
+  else
+    echo "[updater] WARN: .env not writable — keeping the floating tag"
+  fi
+  rm -f "$_tmp"
+}
+
 # --- the update itself ------------------------------------------------------
 run_update() {
   : > "$LOG"
@@ -156,6 +201,8 @@ run_update() {
   fi
   write_state syncing 0 0 "$_req_version"
   sync_deploy_files "$_req_version"
+  # Pin BEFORE pulling, so pull/recreate fetch exactly the target release.
+  pin_version "$_req_version"
 
   # Every service except ourselves. Recreating the updater would kill this shell
   # mid-update (trap #1 above), so it is deliberately excluded and keeps running
