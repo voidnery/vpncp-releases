@@ -32,6 +32,7 @@ DIR="${VPNCP_PROJECT_DIR:-/compose}"
 FILE="${VPNCP_COMPOSE_FILE:-docker-compose.dist.yml}"
 SELF_SERVICE="${VPNCP_UPDATER_SERVICE:-updater}"
 REQUEST="$TRIGGER_DIR/request.json"
+INCIDENTS="$TRIGGER_DIR/incidents.log"
 RELEASES_BASE="${VPNCP_RELEASES_BASE_URL:-https://raw.githubusercontent.com/voidnery/vpncp-releases/main}"
 
 # The ONLY on-host files an update may overwrite. Enforced HERE, not taken from
@@ -72,6 +73,34 @@ if ! docker compose version >/dev/null 2>&1; then
     echo "[updater] WARN: could not install compose plugin; updates will fail"
 fi
 
+# HTTPS is required to read release manifests. busybox wget delegates TLS to
+# ssl_client, which fails with a bare "ssl_client: SSL_connect" when the CA
+# bundle is missing — exactly what silently disabled deploy-file sync on a live
+# install. curl gives real error messages, so prefer it and fall back to wget.
+if ! command -v curl >/dev/null 2>&1; then
+  apk add --no-cache curl ca-certificates >/dev/null 2>&1 || \
+    apk add --no-cache ca-certificates >/dev/null 2>&1 || \
+    echo "[updater] WARN: could not install curl/ca-certificates"
+fi
+
+# fetch_url <url> <dest> -> 0 on success. Writes the real error to $LOG.
+fetch_url() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --max-time 60 "$1" -o "$2" 2>>"$LOG"
+  else
+    wget -q -T 60 -O "$2" "$1" 2>>"$LOG"
+  fi
+}
+
+# Self-test so a broken TLS stack is visible in the log at startup instead of
+# only when an update silently skips its sync.
+if fetch_url "${VPNCP_RELEASES_BASE_URL:-https://raw.githubusercontent.com/voidnery/vpncp-releases/main}/stable.json" /tmp/.tlscheck 2>/dev/null; then
+  echo "[updater] HTTPS to the release repo OK"
+  rm -f /tmp/.tlscheck
+else
+  echo "[updater] WARN: cannot reach the release repo over HTTPS — deploy-file sync will be skipped"
+fi
+
 PROJECT="$(docker inspect "$(hostname)" \
   --format '{{index .Config.Labels "com.docker.compose.project"}}' 2>/dev/null || true)"
 if [ -n "$PROJECT" ]; then PROJ="-p $PROJECT"; else PROJ=""; fi
@@ -95,8 +124,12 @@ sync_deploy_files() {
   [ -n "$_version" ] || return 0
 
   _mf="$TRIGGER_DIR/manifest.json"
-  if ! wget -q -T 20 -O "$_mf" "$RELEASES_BASE/versions/$_version.json" 2>>"$LOG"; then
-    echo "[updater] no version manifest for $_version — skipping deploy sync"
+  if ! fetch_url "$RELEASES_BASE/versions/$_version.json" "$_mf"; then
+    # Not fatal (images can still be pulled), but it must never be silent again:
+    # a failing fetch here is what stopped compose/watch.sh updates from ever
+    # reaching a live install.
+    echo "[updater] WARN: could not fetch manifest for $_version — deploy files NOT synced"
+    echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') sync skipped: manifest fetch failed for $_version" >> "$INCIDENTS"
     return 0
   fi
 
@@ -118,7 +151,7 @@ sync_deploy_files() {
       continue
     fi
     _tmp="$TRIGGER_DIR/dl.tmp"
-    if ! wget -q -T 30 -O "$_tmp" "$RELEASES_BASE/bundle/$_path" 2>>"$LOG"; then
+    if ! fetch_url "$RELEASES_BASE/bundle/$_path" "$_tmp"; then
       echo "[updater] WARN: could not download $_path — keeping current file"
       continue
     fi
@@ -279,8 +312,6 @@ run_update() {
 # Before restarting, the dead container's exit code / OOM flag are recorded. That
 # is what was missing during the incident: recreating the container destroyed the
 # only evidence of why it died.
-INCIDENTS="$TRIGGER_DIR/incidents.log"
-
 watchdog_tick() {
   [ -n "$PROJECT" ] || return 0
   docker ps -a --filter "label=com.docker.compose.project=$PROJECT" \

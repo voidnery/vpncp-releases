@@ -54,11 +54,33 @@ else
 fi
 echo
 
-echo "4. Shared trigger volume + last reported state"
+echo "4. Can the sidecar reach the release repo over HTTPS?"
+# The sidecar runs busybox wget, whose TLS lives in a separate ssl_client binary.
+# Without a CA bundle it fails with a bare "ssl_client: SSL_connect" and deploy
+# file sync is silently skipped — an install then never receives compose/updater
+# changes, only new images.
+BASE_URL="${VPNCP_RELEASES_BASE_URL:-https://raw.githubusercontent.com/voidnery/vpncp-releases/main}"
+if docker compose -f "$FILE" exec -T updater sh -c "
+      if command -v curl >/dev/null 2>&1; then curl -fsS --max-time 20 -o /dev/null '$BASE_URL/stable.json';
+      else wget -q -T 20 -O /dev/null '$BASE_URL/stable.json'; fi" 2>/dev/null; then
+  ok "sidecar can fetch release manifests"
+else
+  bad "sidecar CANNOT fetch release manifests over HTTPS"
+  info "deploy-file sync is being skipped; compose + updater updates never arrive"
+  info "fix: ./scripts/enable-self-update.sh (installs the current updater script)"
+fi
+echo
+
+echo "5. Shared trigger volume + last reported state"
 docker compose -f "$FILE" exec -T api sh -c 'ls -la /run/vpncp-update 2>/dev/null' 2>/dev/null | sed 's/^/      /' \
   || bad "api cannot see /run/vpncp-update (volume not mounted)"
 STATE="$(docker compose -f "$FILE" exec -T api sh -c 'cat /run/vpncp-update/state.json 2>/dev/null' 2>/dev/null)"
 [ -n "$STATE" ] && { ok "state.json:"; echo "      $STATE"; } || info "no state.json yet (no update has run through the sidecar)"
+echo
+
+echo "6. Watchdog / incidents recorded by the sidecar"
+docker compose -f "$FILE" exec -T updater sh -c 'tail -15 /run/vpncp-update/incidents.log 2>/dev/null' 2>/dev/null \
+  | sed 's/^/      /' || info "no incidents log yet"
 echo
 
 echo "=== Verdict ==="
