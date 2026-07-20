@@ -151,15 +151,9 @@ sync_deploy_files() {
       continue
     fi
     _tmp="$TRIGGER_DIR/dl.tmp"
-    # Prefer the immutable per-version copy: `bundle/` is overwritten by every
-    # release, so it matches only the newest one and its bytes will not match an
-    # older manifest's hash. Fall back to bundle/ for releases cut before
-    # bundles/<version>/ existed.
-    if ! fetch_url "$RELEASES_BASE/bundles/$_version/$_path" "$_tmp"; then
-      if ! fetch_url "$RELEASES_BASE/bundle/$_path" "$_tmp"; then
-        echo "[updater] WARN: could not download $_path — keeping current file"
-        continue
-      fi
+    if ! fetch_url "$RELEASES_BASE/bundle/$_path" "$_tmp"; then
+      echo "[updater] WARN: could not download $_path — keeping current file"
+      continue
     fi
     _got="$(sha256sum "$_tmp" | cut -d" " -f1)"
     if [ "$_got" != "$_sha" ]; then
