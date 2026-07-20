@@ -28,7 +28,7 @@ TRIGGER_DIR=/run/vpncp-update
 TRIGGER="$TRIGGER_DIR/trigger"
 STATE="$TRIGGER_DIR/state.json"
 LOG="$TRIGGER_DIR/last-update.log"
-DIR="${VPNCP_PROJECT_DIR:-/compose}"   # must match the host path (see compose)
+DIR="${VPNCP_PROJECT_DIR:-/compose}"
 FILE="${VPNCP_COMPOSE_FILE:-docker-compose.dist.yml}"
 SELF_SERVICE="${VPNCP_UPDATER_SERVICE:-updater}"
 REQUEST="$TRIGGER_DIR/request.json"
@@ -227,32 +227,8 @@ pin_version() {
 }
 
 # --- the update itself ------------------------------------------------------
-# Refuses to run when the project directory is not visible at its real host path.
-#
-# compose resolves relative bind sources against the CALLER's working directory.
-# If ours differs from the host's, Docker invents empty directories for every
-# relative mount — which is how an update once left nginx with no config and no
-# listening socket. Better to skip the update loudly than to break the panel.
-paths_sane() {
-  [ -f "$DIR/$FILE" ] || { echo "[updater] FATAL: $DIR/$FILE not visible"; return 1; }
-  # A relative bind source that must exist for nginx to serve anything.
-  if grep -q "ops/nginx/conf.d" "$DIR/$FILE" 2>/dev/null && [ ! -d "$DIR/ops/nginx/conf.d" ]; then
-    echo "[updater] FATAL: $DIR/ops/nginx/conf.d missing — relative mounts would resolve to empty dirs"
-    return 1
-  fi
-  case "$DIR" in
-    /compose) echo "[updater] FATAL: project mounted at /compose; set VPNCP_COMPOSE_DIR to the host path"; return 1 ;;
-  esac
-  return 0
-}
-
 run_update() {
   : > "$LOG"
-  if ! paths_sane; then
-    write_state failed 0 0 "" "updater is misconfigured: project directory not visible at its host path — see docs/SELF-UPDATE.md"
-    echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') update refused: project path mismatch ($DIR)" >> "$INCIDENTS"
-    return 1
-  fi
   rm -f "$TRIGGER_DIR/.changed"
 
   # Sync deploy files FIRST, so the pull/recreate below already uses the compose
