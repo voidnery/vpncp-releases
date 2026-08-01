@@ -1,0 +1,173 @@
+# =============================================================================
+# VPN Control Plane — DISTRIBUTION compose (pull pre-built images).
+#
+# For end-user installs of the closed-source product. Unlike docker-compose.yml
+# (which BUILDS from source — maintainer only), this pulls version-pinned images
+# published by CI to a registry. Mongo + Redis are bundled.
+#
+#   Pin a version:   VPNCP_VERSION=v0.1.0  in .env  (default: stable)
+#   Registry:        VPNCP_REGISTRY=ghcr.io/<you>  in .env
+#   Update:          docker compose -f docker-compose.dist.yml pull && \
+#                    docker compose -f docker-compose.dist.yml up -d
+#
+# NOTE: the referenced images (vpncp-api / vpncp-web) are published in Phase 2
+# (CI). Until then this file is the distribution template.
+# =============================================================================
+
+networks:
+  vpncp:
+    driver: bridge
+
+volumes:
+  mongo_data:
+  redis_data:
+  certbot_certs:
+  certbot_www:
+  ca_data:
+  vpncp_update:
+
+services:
+  mongo:
+    image: mongo:7.0
+    restart: unless-stopped
+    networks: [vpncp]
+    volumes:
+      - mongo_data:/data/db
+      - ./ops/mongo/init.js:/docker-entrypoint-initdb.d/init.js:ro
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASS}
+      MONGO_INITDB_DATABASE: ${MONGO_DB}
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7.2-alpine
+    restart: unless-stopped
+    networks: [vpncp]
+    command: ["redis-server", "--requirepass", "${REDIS_PASS}", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASS}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    image: ${VPNCP_REGISTRY:-ghcr.io/voidnery}/vpncp-api:${VPNCP_VERSION:-stable}
+    restart: unless-stopped
+    networks: [vpncp]
+    env_file: .env
+    environment:
+      # Enables in-panel self-update: api writes a trigger the updater watches.
+      VPNCP_UPDATE_COMMAND: "date +%s > /run/vpncp-update/trigger"
+      # Used only to render the manual command on the Updates page.
+      VPNCP_COMPOSE_DIR: ${VPNCP_COMPOSE_DIR:-/opt/vpncp}
+      VPNCP_COMPOSE_FILE: docker-compose.dist.yml
+    volumes:
+      - ca_data:/app/ca
+      - vpncp_update:/run/vpncp-update
+    depends_on:
+      mongo: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://localhost:4000/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  web:
+    image: ${VPNCP_REGISTRY:-ghcr.io/voidnery}/vpncp-web:${VPNCP_VERSION:-stable}
+    restart: unless-stopped
+    networks: [vpncp]
+    depends_on: [api]
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    networks: [vpncp]
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8443:8443"
+    volumes:
+      - ./ops/nginx/conf.d:/etc/nginx/conf.d:ro
+      - certbot_certs:/etc/letsencrypt:ro
+      - certbot_www:/var/www/certbot:ro
+    depends_on:
+      # service_started, NOT service_healthy. nginx does not need a healthy api to
+      # start: it proxies, and a request arriving early gets a brief 502 instead
+      # of a refused connection. Waiting for health made every update take the
+      # whole site offline for ~90s (api has a 30s start_period), which looked
+      # exactly like a crash from the browser — the panel appeared dead while it
+      # was merely waiting. Serving a 502 for a few seconds beats refusing TCP.
+      api: { condition: service_started }
+      web: { condition: service_started }
+    # Liveness of nginx ITSELF, deliberately independent of the config and of the
+    # upstreams: any HTTP status line (200, 404, even 502) proves nginx is serving.
+    # Checking a specific route would report "unhealthy" whenever api or web is
+    # down, which is a different fault entirely.
+    # Informational only — the updater's watchdog restarts containers that are not
+    # RUNNING, never merely unhealthy ones, so this can never cause a restart loop.
+    healthcheck:
+      # Asserts a LISTENING SOCKET on 443, not a live process.
+      #
+      # The previous version accepted `pidof nginx` as proof of life. It reported
+      # "healthy" for an nginx that had started with an empty config directory and
+      # was listening on nothing at all — hiding a total outage behind a green
+      # status for several days. A liveness probe that cannot fail is worse than
+      # no probe: this one fails within 30s if nginx is not actually serving.
+      test: ["CMD-SHELL", "netstat -ltn 2>/dev/null | grep -q ':443 ' || ss -ltn 2>/dev/null | grep -q ':443 '"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  certbot:
+    image: certbot/certbot:latest
+    restart: "no"
+    volumes:
+      - certbot_certs:/etc/letsencrypt
+      - certbot_www:/var/www/certbot
+    entrypoint: ["sh", "-c", "trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done"]
+
+  # Privileged helper for in-panel self-update. Holds the Docker socket so the
+  # api container does not have to. Watches a trigger file and recreates the
+  # stack with the freshly pulled images. Omit this service to keep updates
+  # fully manual (the panel then shows the host command instead of the animation).
+  updater:
+    image: docker:27-cli
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/updater/watch.sh"]
+    environment:
+      VPNCP_COMPOSE_FILE: docker-compose.dist.yml
+      # MUST be the real host path of this folder, and the bind mount below must
+      # expose it at the SAME path inside the container.
+      #
+      # Why: compose resolves relative bind sources (./ops/nginx/conf.d) against
+      # the working directory of whoever runs the command. When the sidecar ran
+      # `compose up -d` from its own /compose, Docker computed /compose/ops/... —
+      # a path that does not exist on the host — and silently CREATED an empty
+      # directory there. nginx then started with zero server blocks and listened
+      # on nothing, taking the panel down on every single update. Mounting the
+      # project at an identical path makes relative sources resolve the same way
+      # inside and outside the container.
+      VPNCP_PROJECT_DIR: ${VPNCP_COMPOSE_DIR:?set VPNCP_COMPOSE_DIR in .env to this folder absolute path}
+      # Where release manifests + the deploy bundle are fetched from. Override
+      # only for a fork or an internal mirror.
+      VPNCP_RELEASES_BASE_URL: ${VPNCP_RELEASES_BASE_URL:-https://raw.githubusercontent.com/voidnery/vpncp-releases/main}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # WRITABLE on purpose: the updater keeps the deploy files (this compose
+      # file, its own script) in sync with the release, so upgrading never needs
+      # files copied in by hand. It only ever writes the paths in its allowlist,
+      # each verified against the sha256 in the signed release manifest. This
+      # grants no new privilege — the Docker socket above is already root.
+      - ${VPNCP_COMPOSE_DIR:?set VPNCP_COMPOSE_DIR in .env}:${VPNCP_COMPOSE_DIR:?set VPNCP_COMPOSE_DIR in .env}
+      - ./ops/updater/watch.sh:/updater/watch.sh:ro
+      - vpncp_update:/run/vpncp-update
