@@ -1,0 +1,5 @@
+#!/bin/sh
+# stop: stop the stack (idempotent). Engine calls it during the rollback recipe.
+set -eu
+APP=/opt/net-control; ENVF=/etc/net-control/net-control.env
+cd "$APP" && docker compose --env-file "$ENVF" stop
