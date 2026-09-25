@@ -1,0 +1,15 @@
+#!/bin/sh
+# snapshot: dump the DB, print the snapshot id to stdout. Idempotent, non-interactive.
+set -eu
+APP=/opt/net-control; ENVF=/etc/net-control/net-control.env
+SNAP_DIR=/var/lib/eterix/net-control/snapshots
+id="db-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+mkdir -p "$SNAP_DIR/$id"
+MONGO_USER="$(grep -E '^MONGO_USER=' "$ENVF" | cut -d= -f2-)"
+MONGO_PASS="$(grep -E '^MONGO_PASS=' "$ENVF" | cut -d= -f2-)"
+MONGO_DB="$(grep -E '^MONGO_DB=' "$ENVF" | cut -d= -f2-)"
+( cd "$APP" && docker compose --env-file "$ENVF" exec -T mongo \
+    mongodump --quiet --archive --gzip \
+      -u "$MONGO_USER" -p "$MONGO_PASS" --authenticationDatabase "$MONGO_DB" -d "$MONGO_DB" \
+  ) > "$SNAP_DIR/$id/dump.gz"
+echo "$id"

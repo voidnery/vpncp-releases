@@ -1,0 +1,5 @@
+#!/bin/sh
+# start: bring the stack up (idempotent).
+set -eu
+APP=/opt/net-control; ENVF=/etc/net-control/net-control.env
+cd "$APP" && docker compose --env-file "$ENVF" up -d

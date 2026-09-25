@@ -2,14 +2,24 @@
   "schema_version": "upd-desc/0",
   "product": "net-control",
   "package": "net-control",
-  "health": { "url": "http://127.0.0.1:4000/healthz", "timeout_sec": 120 },
+  "health": {
+    "url": "http://127.0.0.1:4000/healthz",
+    "timeout_sec": 120
+  },
   "hooks": {
     "snapshot": "/usr/lib/eterix/net-control/hooks/snapshot",
-    "restore":  "/usr/lib/eterix/net-control/hooks/restore",
-    "stop":     "/usr/lib/eterix/net-control/hooks/stop",
-    "start":    "/usr/lib/eterix/net-control/hooks/start"
+    "restore": "/usr/lib/eterix/net-control/hooks/restore",
+    "stop": "/usr/lib/eterix/net-control/hooks/stop",
+    "start": "/usr/lib/eterix/net-control/hooks/start"
   },
   "compose": "/opt/net-control/docker-compose.yml",
   "docker_config": "/etc/eterix/net-control/docker",
-  "min_engine": "0.1.0"
+  "min_engine": "0.1.0",
+  "apt": {
+    "sources_file": "/etc/apt/sources.list.d/eterix-net-control.sources",
+    "components": [
+      "main",
+      "core"
+    ]
+  }
 }
