@@ -1,5 +1,8 @@
 #!/bin/sh
 # start: bring the stack up (idempotent).
+# P17: `up -d` detaches — dockerd owns the containers; the hook returns and does
+# NOT hold the stack inside its own process group (which the engine's oneshot
+# service would kill on exit). Compliant for the Docker case.
 set -eu
 APP=/opt/net-control; ENVF=/etc/net-control/net-control.env
 cd "$APP" && docker compose --env-file "$ENVF" up -d
