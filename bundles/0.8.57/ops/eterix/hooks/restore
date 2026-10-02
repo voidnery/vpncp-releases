@@ -1,0 +1,14 @@
+#!/bin/sh
+# restore <snapshot-id>: restore the DB from a snapshot. Idempotent, non-interactive.
+set -eu
+[ -n "${1:-}" ] || { echo "restore: snapshot id required" >&2; exit 2; }
+APP=/opt/net-control; ENVF=/etc/net-control/net-control.env
+SNAP="/var/lib/eterix/net-control/snapshots/$1/dump.gz"
+[ -f "$SNAP" ] || { echo "restore: snapshot $1 not found" >&2; exit 2; }
+MONGO_USER="$(grep -E '^MONGO_USER=' "$ENVF" | cut -d= -f2-)"
+MONGO_PASS="$(grep -E '^MONGO_PASS=' "$ENVF" | cut -d= -f2-)"
+MONGO_DB="$(grep -E '^MONGO_DB=' "$ENVF" | cut -d= -f2-)"
+( cd "$APP" && docker compose --env-file "$ENVF" exec -T mongo \
+    mongorestore --quiet --archive --gzip --drop \
+      -u "$MONGO_USER" -p "$MONGO_PASS" --authenticationDatabase "$MONGO_DB" \
+  ) < "$SNAP"
