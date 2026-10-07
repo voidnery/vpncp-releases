@@ -2,7 +2,7 @@
 # snapshot: dump the DB, print the snapshot id to stdout. Idempotent, non-interactive.
 set -eu
 APP=/opt/net-control; ENVF=/etc/net-control/net-control.env
-SNAP_DIR=/var/backups/eterix/net-control
+SNAP_DIR=/var/lib/eterix/net-control/snapshots
 id="db-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 mkdir -p "$SNAP_DIR/$id"
 MONGO_USER="$(grep -E '^MONGO_USER=' "$ENVF" | cut -d= -f2-)"
