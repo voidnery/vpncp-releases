@@ -1,14 +1,46 @@
 #!/bin/sh
-# restore <snapshot-id>: restore the DB from a snapshot. Idempotent, non-interactive.
-set -eu
-[ -n "${1:-}" ] || { echo "restore: snapshot id required" >&2; exit 2; }
+# restore <snapshot-id> — restore the DB from a snapshot. Idempotent, non-interactive.
+#
+# The engine calls restore in the rollback_stopped phase — i.e. with the stack STOPPED,
+# so mongo is down. mongorestore needs a live DB, so this hook brings up ONLY the mongo
+# container for the duration and puts it back as it found it. This keeps the restore
+# entirely within the product (no change to the engine's rollback recipe). Every failure
+# NAMES its precondition instead of a bare exit 1 — the engine can only relay what it's told.
+set -u
+[ -n "${1:-}" ] || { echo "restore: precondition failed — snapshot id required" >&2; exit 2; }
 APP=/opt/net-control; ENVF=/etc/net-control/net-control.env
 SNAP="/var/backups/eterix/net-control/$1/dump.gz"
-[ -f "$SNAP" ] || { echo "restore: snapshot $1 not found" >&2; exit 2; }
+[ -f "$SNAP" ] || { echo "restore: precondition failed — snapshot $1 not found at $SNAP" >&2; exit 2; }
 MONGO_USER="$(grep -E '^MONGO_USER=' "$ENVF" | cut -d= -f2-)"
 MONGO_PASS="$(grep -E '^MONGO_PASS=' "$ENVF" | cut -d= -f2-)"
 MONGO_DB="$(grep -E '^MONGO_DB=' "$ENVF" | cut -d= -f2-)"
-( cd "$APP" && docker compose --env-file "$ENVF" exec -T mongo \
-    mongorestore --quiet --archive --gzip --drop \
-      -u "$MONGO_USER" -p "$MONGO_PASS" --authenticationDatabase "$MONGO_DB" \
-  ) < "$SNAP"
+
+compose() { ( cd "$APP" && docker compose --env-file "$ENVF" "$@" ); }
+mongo_ready() { compose exec -T mongo mongosh --quiet --eval 'db.runCommand({ping:1}).ok' 2>/dev/null | grep -q 1; }
+
+# Bring mongo up for the restore if the stack is stopped (rollback_stopped phase).
+started=0
+if ! compose ps mongo 2>/dev/null | grep -q "Up"; then
+  if ! compose up -d mongo >/dev/null 2>&1; then
+    echo "restore: precondition failed — database container could not be started" >&2; exit 1
+  fi
+  started=1
+fi
+i=0; while [ "$i" -lt 30 ]; do mongo_ready && break; sleep 2; i=$((i + 1)); done
+if ! mongo_ready; then
+  echo "restore: precondition failed — database did not become ready in time" >&2
+  [ "$started" = 1 ] && compose stop mongo >/dev/null 2>&1
+  exit 1
+fi
+
+# Restore the dump into the live mongo.
+rc=0
+compose exec -T mongo \
+  mongorestore --quiet --archive --gzip --drop \
+    -u "$MONGO_USER" -p "$MONGO_PASS" --authenticationDatabase "$MONGO_DB" \
+  < "$SNAP" || rc=$?
+
+# Put mongo back as we found it — the rollback recipe expects the stack stopped.
+[ "$started" = 1 ] && compose stop mongo >/dev/null 2>&1
+[ "$rc" -eq 0 ] || echo "restore: mongorestore failed (rc=$rc)" >&2
+exit "$rc"
